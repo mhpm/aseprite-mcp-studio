@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import io
 import os
@@ -16,7 +17,7 @@ from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from PIL import Image as PILImage
 
-from . import __version__, animate, ase_format, ops, render, review, tween
+from . import __version__, animate, ase_format, live, ops, render, review, tween
 from .color import parse, ramp, to_hex
 from .document import Cel, StudioError, trim
 from .pixelize import pixelize as pixelize_image
@@ -40,6 +41,9 @@ Typical work:
   makes the in-betweens; add anticipation / overshoot with `extra`.
 * After every animation pass: find_glitches (each frame against the previous and next frame and
   the master, onion-skin view with every problem boxed), then apply op fix_glitches.
+* The user reviews in Studio Live (live_open gives the URL): they select wrong frames and paint
+  the wrong pixels. Read those with review_notes before working on a file, fix, then
+  resolve_note with what was done.
 Every edit is one transaction (all or nothing) and can be undone with undo.
 """
 
@@ -838,7 +842,99 @@ def verify_with_aseprite(path: str) -> dict:
     return {"ok": not bad, "frames_checked": spr.frame_count, "mismatches": bad}
 
 
+# ---------------------------------------------------------------------------- live viewer and review
+_live: live.Live | None = None
+
+
+def _get_live() -> live.Live:
+    global _live
+    if _live is None:
+        _live = live.Live(store)
+    return _live
+
+
+@tool
+def live_open(path: str | None = None) -> dict:
+    """Studio Live: the built-in web viewer (local only). Plays frames at their real durations,
+    onion skin, compare two frames (side by side / difference / blink), versions of every save
+    with a before/after difference, and find_glitches boxes over the frames. The user selects
+    wrong frames and paints the exact wrong pixels with a brush, adds quick tags and a note; read
+    those with review_notes. Returns the URL (open it in the browser pane); with `path` it opens
+    that file."""
+    url = _get_live().start()
+    if path:
+        from urllib.parse import quote
+
+        url += "?file=" + quote(str(store.resolve(path, must_exist=True)))
+    return {"url": url, "notes": "the user's marks are read with review_notes(path)"}
+
+
+def _note_files(path: str | None) -> list[Path]:
+    if path:
+        return [store.resolve(path, must_exist=True)]
+    out = []
+    for root in store.roots:
+        for f in root.rglob("*.review.json"):
+            if not any(part in live.SKIP_DIRS for part in f.parts):
+                out.append(f.with_name(f.name[: -len(".review.json")]))
+    return out
+
+
+@tool
+def review_notes(path: str | None = None, status: str = "open", pictures: bool = True) -> list:
+    """What the user marked in Studio Live: wrong frames, painted pixels, tags and text.
+    Without `path`, every sprite with notes under the allowed folders. status: open | resolved | all.
+    Each note gives its frames (1-based), tags (hole, stray, cut, limb, flicker, stiff, pose,
+    color, shape, timing), the user's text and per marked frame the pixel bbox and the pixels
+    themselves (sprite coordinates). The picture of each note shows the previous frame, the
+    marked frame with the user's marks in pink, and the next frame. Fix, then resolve_note."""
+    if status not in ("open", "resolved", "all"):
+        raise StudioError("status is open, resolved or all")
+    lv = _get_live()
+    out: list = []
+    found = []
+    for p in _note_files(path):
+        notes = [n for n in lv.notes.read(p) if status == "all" or n.get("status") == status]
+        if not notes:
+            continue
+        spr = store.load(str(p))[1] if p.exists() else None
+        for n in notes:
+            marks = {}
+            for k, pts in n.get("marks", {}).items():
+                xs, ys = [q[0] for q in pts], [q[1] for q in pts]
+                m = {"pixels": len(pts), "bbox": [min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1]}
+                if len(pts) <= 300:
+                    m["points"] = pts
+                marks[k] = m
+            found.append(
+                {
+                    "file": str(p),
+                    **{k: n[k] for k in ("id", "frames", "tags", "text", "status", "reply")},
+                    "marks": marks,
+                }
+            )
+            if pictures and spr is not None and len(out) < 8:
+                out.append(Image(data=live.note_picture(spr, n), format="png"))
+    return [{"notes": found, "count": len(found)}, *out]
+
+
+@tool
+def resolve_note(path: str, note_id: str, reply: str = "", status: str = "resolved") -> dict:
+    """Answer a Studio Live note: say what was fixed (the user sees it under the note) and mark it
+    resolved, or reopen it with status="open"."""
+    if status not in ("open", "resolved"):
+        raise StudioError("status is open or resolved")
+    lv = _get_live()
+    p = store.resolve(path, must_exist=True)
+    note = lv.notes.update(p, note_id, status=status, reply=reply)
+    lv.broadcast({"type": "notes", "path": str(p)})
+    return note
+
+
 def main() -> None:
+    if os.environ.get("ASE_STUDIO_LIVE", "1") != "0":
+        with contextlib.suppress(OSError):  # the viewer is optional; the tools work without it
+            _get_live().start()
     mcp.run()
 
 

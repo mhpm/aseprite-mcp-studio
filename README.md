@@ -84,6 +84,9 @@ Environment:
 | `export` | GIF, PNG, one PNG per frame, or a sprite sheet with JSON metadata. |
 | `make_ramp` | Hue-shifted shading ramp in OKLCh. |
 | `verify_with_aseprite` | Renders the file in the real Aseprite and compares. |
+| `live_open` | Opens Studio Live, the built-in viewer (see below), and returns its URL. |
+| `review_notes` | What the user marked in Studio Live: frames, painted pixels, tags, text, with a picture of the previous / marked / next frame. |
+| `resolve_note` | Answers a note (the user sees the reply) and marks it resolved or reopens it. |
 
 ### `apply` ops
 
@@ -133,6 +136,33 @@ on many frames at once. Add `lock_alpha: true` to paint only over existing pixel
    lot (foreshortening), so look at it closely.
 4. `find_glitches(path, layer="jump", master_frames=[1, 6])` (both drawings are references), then
    `fix_glitches`, and fix by hand what is left.
+
+## Studio Live (built-in viewer)
+
+The server starts a local web viewer with it (127.0.0.1, port 7790 or `ASE_STUDIO_LIVE_PORT`;
+`ASE_STUDIO_LIVE=0` turns it off; two sessions share one viewer). `live_open` returns the URL;
+`python -m aseprite_mcp_studio.live [--port N] [folder ...]` runs it on its own. It draws with the
+same renderer as the tools, so it shows exactly what gets exported.
+
+- Plays frames at their real durations, by tag (forward, reverse, ping-pong), at 0.25x to 2x.
+- Onion skin (previous red, next blue), pixel grid, checker / green / dark / light backgrounds,
+  integer zoom (Ctrl+wheel).
+- Compare two frames side by side, as a difference (changed pixels in magenta) or blinking.
+- Versions: every save is kept (last 30 per file in memory); pick an older one and see what a
+  fix changed against the current file.
+- `find_glitches` boxes over the frames and serious-problem counts on the timeline; the "keys"
+  field takes the key drawings of a transition (e.g. `1,6`).
+- Review: select wrong frames (Ctrl/Shift-click or the check box), paint the exact pixels with
+  the brush or a box, add quick tags (hole, stray pixel, cut, limb wrong, flicker, stiff, pose,
+  colour, shape, timing) and a note. Notes are saved next to the sprite as
+  `<name>.aseprite.review.json`; the agent reads them with `review_notes`, fixes, and answers
+  with `resolve_note`, and the page shows the answer live.
+- Updates live (server-sent events) when a tool edits a file or it is saved in Aseprite; each
+  version of a sprite renders once, as one strip the page slices.
+
+Keys: V move, B brush, R box, E eraser, Space play, arrows step, S select frame, O onion,
+G grid, X glitches, M notes, D compare, 1-9 zoom, N save note, Esc clear, Ctrl+Z undo and
+Ctrl+Y / Ctrl+Shift+Z redo (strokes, boxes, erasing, frame selection, clearing).
 
 ## Development
 

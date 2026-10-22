@@ -471,6 +471,72 @@ def test_tween_poses_needs_matching_parts(tmp_path):
         server.tween_poses(f, rs, re_, "start", "end", "move")
 
 
+# ---------------------------------------------------------------------------- studio live
+def _http(url, method="GET", body=None):
+    import json as _json
+    import urllib.request
+
+    req = urllib.request.Request(url, method=method, data=_json.dumps(body).encode() if body is not None else None)
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=5) as r:
+        data = r.read()
+        return (_json.loads(data) if r.headers.get("Content-Type", "").startswith("application/json") else data), r
+
+
+def test_live_serves_frames_notes_and_events(tmp_path):
+    from aseprite_mcp_studio.live import Live
+    from aseprite_mcp_studio.store import Store
+
+    f = _glitch_sprite(tmp_path)
+    lv = Live(Store([str(tmp_path)]), port=0)
+    url = lv.start()
+    try:
+        files, _ = _http(url + "api/files")
+        assert [x["rel"] for x in files["files"]] == ["g.aseprite"]
+        info, _ = _http(url + "api/sprite?path=" + f)
+        assert (info["width"], info["height"], info["frames"]) == (24, 16, 3)
+        png, r = _http(url + f"api/strip?path={f}&v={info['v']}")
+        strip = np.array(Image.open(__import__("io").BytesIO(png)))
+        assert strip.shape == (16, 72, 4) and r.headers["X-Version"] == str(info["v"])
+        note, _ = _http(
+            url + "api/notes",
+            "POST",
+            {"path": f, "frames": [2], "marks": {"2": [[9, 8], [10, 8]]}, "tags": ["hole"], "text": "x"},
+        )
+        assert note["id"] == "n1" and note["frames"] == [2] and note["status"] == "open"
+        listed, _ = _http(url + "api/notes?path=" + f)
+        assert [n["id"] for n in listed["notes"]] == ["n1"]
+        # an edit through the store reaches the page as an event, and the old version is kept
+        q = lv.subscribe()
+        assert lv.changed in lv.store.listeners  # the live server registered itself
+        with lv.store.edit(f) as (_, spr):
+            spr.durations[0] = 250
+        msg = q.get(timeout=3)
+        assert '"type": "file"' in msg
+        info2, _ = _http(url + "api/sprite?path=" + f)
+        assert info2["durations"][0] == 250 and len(info2["versions"]) == 2
+        old, _ = _http(url + f"api/strip?path={f}&v={info['v']}")
+        assert old == png  # the previous version still renders as it was
+    finally:
+        lv.stop()
+
+
+def test_review_notes_and_resolve_note(tmp_path):
+    from aseprite_mcp_studio.live import Notes
+
+    f = _glitch_sprite(tmp_path)
+    Notes().add(Path(f), {"frames": [2], "marks": {"2": [[9, 8]]}, "tags": ["stray"], "text": "loose pixel"})
+    res = server.review_notes(f)
+    notes = res[0]["notes"]
+    got = [(n["id"], n["frames"], n["tags"], n["marks"]["2"]["points"]) for n in notes]
+    assert got == [("n1", [2], ["stray"], [[9, 8]])]
+    assert res[1].data[1:4] == b"PNG"  # previous | marked | next
+    done = server.resolve_note(f, "n1", "erased it")
+    assert done["status"] == "resolved" and done["reply"] == "erased it"
+    assert server.review_notes(f)[0]["count"] == 0
+    assert server.review_notes(f, status="all")[0]["count"] == 1
+
+
 def test_damage_number_rises_and_fades(tmp_path):
     f = str(tmp_path / "d.aseprite")
     server.sprite_new(f, 40, 30, frames=6)

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 from collections.abc import Callable
@@ -34,6 +35,13 @@ class Store:
         self._redo: dict[Path, list[bytes | None]] = {}
         self._locks: dict[Path, threading.Lock] = {}
         self._guard = threading.Lock()
+        # called with the file's Path after every write, undo and redo (the live viewer listens)
+        self.listeners: list[Callable[[Path], None]] = []
+
+    def _notify(self, p: Path) -> None:
+        for fn in list(self.listeners):
+            with contextlib.suppress(Exception):  # a viewer must never break an edit
+                fn(p)
 
     # ------------------------------------------------------------------ paths
     def resolve(self, path: str, must_exist: bool = False) -> Path:
@@ -76,6 +84,7 @@ class Store:
             stack.append(previous)
             del stack[:-UNDO_DEPTH]
             self._redo.pop(p, None)
+        self._notify(p)
         return n
 
     @contextmanager
@@ -122,7 +131,9 @@ class Store:
                     p.write_bytes(prev)
                     self._cache.pop(p, None)
                 done += 1
-            return done
+        if done:
+            self._notify(p)
+        return done
 
     def redo(self, path: str, steps: int = 1) -> int:
         p = self.resolve(path)
@@ -139,7 +150,9 @@ class Store:
                     p.write_bytes(nxt)
                 self._cache.pop(p, None)
                 done += 1
-            return done
+        if done:
+            self._notify(p)
+        return done
 
     def history(self, path: str) -> dict:
         p = self.resolve(path)
