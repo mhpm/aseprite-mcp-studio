@@ -33,7 +33,7 @@ What it is for:
 ## Install
 
 ```bash
-uv tool install git+https://github.com/<you>/aseprite-mcp-studio
+uv tool install git+https://github.com/mhpm/aseprite-mcp-studio
 ```
 
 or from a clone:
