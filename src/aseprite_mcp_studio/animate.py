@@ -27,7 +27,9 @@ the part (and its children). "hide": true hides a part.
 
 Joints: rotating a limb opens a gap at the joint. With `overlap` = n, each part also carries
 the source pixels within n px around it (taken from its neighbours), drawn *under* every part,
-so the gap is filled with the right colours instead of showing a hole.
+so the gap is filled with the right colours instead of showing a hole. With
+"overlap_from": "parent" that padding comes only from the part's parent, for limbs that swing
+far (a pose-to-pose tween) and would otherwise carry off pixels of whatever they touched.
 """
 
 from __future__ import annotations
@@ -111,6 +113,12 @@ class Rig:
     def __init__(self, source: np.ndarray, spec: dict):
         self.src = source
         self.overlap = int(spec.get("overlap", 1))
+        # "any": the joint padding comes from every neighbour (fine for small turns);
+        # "parent": only from the part's parent, so a limb swinging far does not carry off a
+        # ring of hair or cloth from whatever it happened to touch
+        self.overlap_from = spec.get("overlap_from", "any")
+        if self.overlap_from not in ("any", "parent"):
+            raise StudioError("overlap_from is any or parent")
         opaque = source[..., 3] > 0
         claimed = np.zeros(opaque.shape, bool)
         self.parts: dict[str, dict] = {}
@@ -135,6 +143,8 @@ class Rig:
             if not p["mask"].any():
                 raise StudioError(f"part {name!r} selects no opaque pixel; check its mask")
             ring = _dilate(p["mask"], self.overlap) & opaque & ~p["mask"] if self.overlap else None
+            if ring is not None and self.overlap_from == "parent":
+                ring &= self.parts[p["parent"]]["mask"] if p["parent"] else np.zeros_like(ring)
             p["image"] = self._cut(p["mask"])
             p["pad"] = self._cut(ring) if ring is not None and ring.any() else None
         # cycle check

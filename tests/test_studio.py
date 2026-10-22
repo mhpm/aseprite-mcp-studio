@@ -394,6 +394,83 @@ def test_fix_glitches_cleans_the_safe_kinds(tmp_path):
     assert server.find_glitches(f)[0]["ok"]
 
 
+def test_a_pocket_of_any_size_is_a_hole_and_refills_from_the_neighbour_frames(tmp_path):
+    f = _glitch_sprite(tmp_path)
+    # a 3x3 pocket inside the body of the middle frame: too wide for a crack, still a hole
+    server.apply(f, [{"op": "erase", "x": 9, "y": 7, "w": 3, "h": 3, "frames": [2]}])
+    holes = [d for d in server.find_glitches(f)[0]["issues"] if d["kind"] == "hole"]
+    assert [(d["frame"], d["pixels"]) for d in holes] == [(2, 9)]
+    server.apply(f, [{"op": "fix_glitches", "frames": [2]}])
+    _, spr = server.store.load(f)
+    pocket = render.render_frame(spr, 1)[7:10, 9:12]
+    assert (pocket[..., 3] == 255).all()
+    assert (pocket[..., :3] == (0x3C, 0x6E, 0xC8)).all()  # body colour, not a black blob
+    assert server.find_glitches(f)[0]["ok"]
+
+
+def test_a_blob_of_outline_is_opened(tmp_path):
+    f = _glitch_sprite(tmp_path)
+    server.apply(f, [{"op": "rect", "x": 9, "y": 6, "w": 4, "h": 4, "color": "#14141e", "fill": True, "frames": [2]}])
+    assert any(d["kind"] == "block" for d in server.find_glitches(f)[0]["issues"])
+    server.apply(f, [{"op": "fix_glitches", "frames": [2]}])
+    assert not [d for d in server.find_glitches(f)[0]["issues"] if d["kind"] == "block"]
+
+
+def _key_poses(tmp_path):
+    """A body with an arm held out sideways (start) and straight up (end), on two layers."""
+    f = str(tmp_path / "k.aseprite")
+    server.sprite_new(f, 40, 40, layers=["start", "end"])
+    body = {"op": "rect", "x": 14, "y": 18, "w": 8, "h": 14, "color": "#3c6ec8", "fill": True}
+    server.apply(
+        f,
+        [
+            {**body, "layer": "start"},
+            {**body, "layer": "end"},
+            {"op": "rect", "x": 22, "y": 19, "w": 12, "h": 3, "color": "#f0c8a0", "fill": True, "layer": "start"},
+            {"op": "rect", "x": 22, "y": 21, "w": 3, "h": 1, "color": "#14141e", "fill": True, "layer": "start"},
+            # the same arm turned a quarter anticlockwise about the shoulder (21, 20)
+            {"op": "rect", "x": 20, "y": 8, "w": 3, "h": 12, "color": "#f0c8a0", "fill": True, "layer": "end"},
+            {"op": "rect", "x": 22, "y": 17, "w": 1, "h": 3, "color": "#14141e", "fill": True, "layer": "end"},
+        ],
+    )
+
+    def rig(arm_rect):
+        return {
+            "parts": [
+                {"name": "arm", "mask": {"rect": arm_rect}, "pivot": [21, 20], "parent": "body"},
+                {"name": "body", "mask": {"rect": [14, 18, 8, 14]}, "pivot": [18, 31]},
+            ],
+            "overlap": 0,
+        }
+
+    return f, rig([22, 19, 12, 3]), rig([20, 8, 3, 12])
+
+
+def test_tween_poses_fits_the_turn_and_keeps_the_keys(tmp_path):
+    f, rs, re_ = _key_poses(tmp_path)
+    rep, view = server.tween_poses(f, rs, re_, "start", "end", "move", inbetweens=3)
+    assert view.data[:4] == b"\x89PNG"
+    assert -100 <= rep["parts"]["arm"]["angle"] <= -80  # sideways to up: a quarter turn anticlockwise
+    assert rep["frames"] == [1, 2, 3, 4, 5]
+    assert rep["drawn_by"][0] == "start drawing" and rep["drawn_by"][-1] == "end drawing"
+    assert rep["bone_stretch"] == {}  # the arm is as long in both drawings: nothing to report
+    _, spr = server.store.load(f)
+    first = render.render_frame(spr, 0, ["move"])
+    last = render.render_frame(spr, 4, ["move"])
+    assert np.array_equal(first, render.render_frame(spr, 0, ["start"]))
+    assert np.array_equal(last, render.render_frame(spr, 0, ["end"]))
+    # the middle in-between has the arm raised diagonally: pixels both right of and above the body
+    mid = render.render_frame(spr, 2, ["move"])[..., 3] > 0
+    assert mid[:18, 22:].any() and not mid[19:22, 30:].any()
+
+
+def test_tween_poses_needs_matching_parts(tmp_path):
+    f, rs, re_ = _key_poses(tmp_path)
+    re_["parts"][0]["name"] = "hand"
+    with pytest.raises(StudioError, match="same part names"):
+        server.tween_poses(f, rs, re_, "start", "end", "move")
+
+
 def test_damage_number_rises_and_fades(tmp_path):
     f = str(tmp_path / "d.aseprite")
     server.sprite_new(f, 40, 30, frames=6)

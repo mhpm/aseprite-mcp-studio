@@ -80,6 +80,7 @@ Environment:
 | `import_strip` | A strip of poses brought in at the master's scale, palette and ground. |
 | `rig_preview` | Shows which pixels each rig part takes, and where each pivot is. |
 | `animate_rig` | Poses a rig over frames from a preset or from keyframes. |
+| `tween_poses` | In-betweens between two drawn key poses: fits each part's turn (bones for parts that carry others, pixels for the rest) and draws each in-between from the nearest real drawing; anticipation and overshoot via `extra`. |
 | `export` | GIF, PNG, one PNG per frame, or a sprite sheet with JSON metadata. |
 | `make_ramp` | Hue-shifted shading ramp in OKLCh. |
 | `verify_with_aseprite` | Renders the file in the real Aseprite and compares. |
@@ -118,6 +119,20 @@ on many frames at once. Add `lock_alpha: true` to paint only over existing pixel
 4. `find_glitches("hero.aseprite", layer="idle", loop=true)`, then `apply` op `fix_glitches` and check again.
    `check_animation(..., kind="loop")`, `check_identity(..., master="hero.aseprite")`, then `view(..., onion=true)`.
 5. `export("hero.aseprite", "hero_idle.gif", scale=4)`.
+
+## Between two key poses
+
+1. Put both drawings on one canvas, on two layers (`start`, `end`), where they should be in the
+   scene (the end of a jump higher up).
+2. Write a rig for each with the same part names and pivots on the same joints (neck, shoulder,
+   hip, grip). Children hang from their parent (`"parent"`); use `"overlap_from": "parent"` so a
+   limb that swings far does not drag pixels it only touched.
+3. `tween_poses(path, rig_start, rig_end, "start", "end", "jump", inbetweens=4,
+   extra=[{"torso": {"dy": 3}}, {"torso": {"dy": -1}}, {}, {}])`: here a crouch before the take-off.
+   The report gives each part's turn and how well it matched; under 0.4 the part changes shape a
+   lot (foreshortening), so look at it closely.
+4. `find_glitches(path, layer="jump", master_frames=[1, 6])` (both drawings are references), then
+   `fix_glitches`, and fix by hand what is left.
 
 ## Development
 

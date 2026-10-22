@@ -104,9 +104,11 @@ def render_frame(
     include_reference: bool = False,
     include_hidden: bool = False,
 ) -> np.ndarray:
-    """Flattened RGBA (uint8) of one 0-based frame. include_hidden also draws hidden layers
-    (for reading a layer that was hidden on purpose, such as a rig's source)."""
+    """Flattened RGBA (uint8) of one 0-based frame. Layers named in `layers` are drawn even when
+    hidden (asking for a layer by name means wanting its pixels, e.g. a rig source hidden on
+    purpose); include_hidden also draws hidden layers that are not named."""
     want = {spr.layer(n).path for n in layers} if layers else None
+    include_hidden = include_hidden or want is not None
     skip = {spr.layer(n).path for n in exclude} if exclude else set()
 
     def filt(la: Layer) -> bool:

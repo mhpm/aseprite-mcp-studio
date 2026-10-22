@@ -16,7 +16,7 @@ from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from PIL import Image as PILImage
 
-from . import __version__, animate, ase_format, ops, render, review
+from . import __version__, animate, ase_format, ops, render, review, tween
 from .color import parse, ramp, to_hex
 from .document import Cel, StudioError, trim
 from .pixelize import pixelize as pixelize_image
@@ -36,6 +36,10 @@ Typical work:
   view with onion=true -> check_animation and check_identity against the master.
 * A reference strip of poses (drawn or generated): import_strip pixelizes every frame at the
   master's scale, locks it to the master's palette and stands each frame on the master's ground.
+* Two key poses (start and end drawings): rig both with the same part names, then tween_poses
+  makes the in-betweens; add anticipation / overshoot with `extra`.
+* After every animation pass: find_glitches (each frame against the previous and next frame and
+  the master, onion-skin view with every problem boxed), then apply op fix_glitches.
 Every edit is one transaction (all or nothing) and can be undone with undo.
 """
 
@@ -296,6 +300,7 @@ def find_glitches(
     frames: Any = None,
     loop: bool = False,
     master_frame: int = 1,
+    master_frames: Any = None,
 ) -> list:
     """Find what animating broke, frame by frame, with an onion-skin view of every frame that
     has a problem (previous frame red, next blue, each problem boxed and labelled).
@@ -304,10 +309,15 @@ def find_glitches(
     Kinds: cut (a part sliced open: interior colours on the outer edge), block (a flat fill
     larger than the master has), blip (a small patch unlike both neighbour frames), stray
     (a detached speck), spur (a single pixel sticking out), hole (an enclosed gap), orphan
-    (a pixel unlike all its neighbours). Run it after every animate/edit pass; fix until ok."""
+    (a pixel unlike all its neighbours). Run it after every animate/edit pass; fix until ok.
+    master_frames: several frames of this sprite that are real drawings (a transition's start and
+    end keys); what any of them contains is design."""
     _, spr = store.load(path)
     fs = _frames(spr, frames) if frames else None
-    m = _load_rgba(master, master_frame) if master else None
+    if master_frames:
+        m = [render.render_frame(spr, f, [layer] if layer else None) for f in _frames(spr, master_frames)]
+    else:
+        m = _load_rgba(master, master_frame) if master else None
     res = review.find_glitches(spr, layer, fs, m, loop)
     marks: dict = {}
     for d in res["issues"]:
@@ -511,8 +521,8 @@ _PART_COLORS = [
 
 
 def _rig_source(spr, layer, frame):
-    # a named source layer is read even when hidden: animate_rig hides it after the first run
-    return render.render_frame(spr, spr.check_frame(frame), [layer] if layer else None, include_hidden=bool(layer))
+    # a named layer is read even when hidden (render_frame): animate_rig hides its source
+    return render.render_frame(spr, spr.check_frame(frame), [layer] if layer else None)
 
 
 @tool
@@ -634,6 +644,88 @@ def animate_rig(
         },
         Image(data=data, format="png"),
     ]
+
+
+@tool
+def tween_poses(
+    path: str,
+    rig_start: dict,
+    rig_end: dict,
+    start_layer: str,
+    end_layer: str,
+    out_layer: str,
+    inbetweens: int = 3,
+    start_frame: int = 1,
+    end_frame: int = 1,
+    first_frame: int = 1,
+    ease: str = "ease_in_out",
+    extra: list[dict] | None = None,
+    durations: list[int] | None = None,
+    angle_range: float = 180.0,
+    clean: bool = True,
+) -> list:
+    """In-betweens between two drawn key poses of one character (pose-to-pose).
+
+    rig_start / rig_end cut each drawing into parts with the SAME names (same masks syntax as
+    rig_preview); put each pivot on the same joint in both drawings (neck, shoulder, hip, grip).
+    For every part the rotation and position that carry it from one drawing to the other are
+    fitted; in-betweens in the first half move the start drawing's parts, those in the second half
+    move the end drawing's parts back, so every frame is made of real drawn pixels.
+    Writes out_layer from first_frame: the start drawing, `inbetweens` frames, the end drawing.
+    ease: ease_in_out | ease_in | ease_out | linear. extra: one pose per in-between added on top
+    (e.g. anticipation [{"torso": {"dy": 3}}, {}, ...]); parts of both rigs, plus "root".
+    Returns the fit per part (angle, match 0..1; under 0.4 = shape changes too much: split it at
+    its joint, e.g. a leg into thigh + shin, or redraw it), bone_stretch (joints whose limb is
+    over 2 px longer or shorter in one drawing: joints stay closed in every in-between, and the
+    length changes where the frames switch drawings), and an onion-skin view.
+    Parts that carry others turn by their bones (pivot -> children's pivots)."""
+    if ease not in ("ease_in_out", "ease_in", "ease_out", "linear"):
+        raise StudioError("ease is ease_in_out, ease_in, ease_out or linear")
+    if extra is not None and len(extra) != inbetweens:
+        raise StudioError(f"extra needs one pose per in-between ({inbetweens})")
+    with store.edit(path) as (_, spr):
+        a = render.render_frame(spr, spr.check_frame(start_frame), [start_layer], include_hidden=True)
+        b = render.render_frame(spr, spr.check_frame(end_frame), [end_layer], include_hidden=True)
+        tw = tween.Tween(a, b, rig_start, rig_end, angle_range)
+        try:
+            la = spr.image_layer(out_layer)
+        except StudioError:
+            la = spr.add_layer(out_layer)
+        n = inbetweens + 2
+        f0 = spr.check_frame(first_frame)
+        if f0 + n > spr.frame_count:
+            spr.insert_frames(spr.frame_count, f0 + n - spr.frame_count, 100)
+        from .pixelize import clean_orphans, remove_specks
+
+        drawn_by = []
+        for k in range(n):
+            if k == 0:
+                img, x, y, who = a, 0, 0, "start drawing"
+            elif k == n - 1:
+                img, x, y, who = b, 0, 0, "end drawing"
+            else:
+                t = tween.progress(inbetweens, ease)[k - 1]
+                img, x, y, who = tw.frame(t, extra[k - 1] if extra else None)
+                if clean:
+                    remove_specks(img, 1)
+                    clean_orphans(img)
+                who = f"{who} rig at {t:.2f}"
+            drawn_by.append(who)
+            t_ = trim(img, x, y)
+            if t_:
+                la.cels[f0 + k] = Cel(*t_)
+            else:
+                la.cels.pop(f0 + k, None)
+        if durations:
+            for k, d in enumerate(durations[:n]):
+                spr.durations[f0 + k] = int(d)
+        for name in (start_layer, end_layer):
+            if name != out_layer:
+                spr.layer(name).visible = False
+        data = render.view_image(spr, list(range(f0, f0 + min(n, 16))), 0, None, "color", True, True, True, [la.path])
+    rep = tw.report()
+    rep.update({"layer": la.path, "frames": list(range(f0 + 1, f0 + n + 1)), "drawn_by": drawn_by})
+    return [rep, Image(data=data, format="png")]
 
 
 # ---------------------------------------------------------------------------- export & misc

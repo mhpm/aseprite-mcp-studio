@@ -219,7 +219,7 @@ GLITCH_KINDS = {
     "blip": "a small patch unlike both the previous and the next frame (onion skin): a flicker",
     "stray": "a detached speck of a few pixels",
     "spur": "a single pixel sticking out of the silhouette, a shape the master never has",
-    "hole": "an enclosed transparent pixel the master never has",
+    "hole": "transparency walled in by the character (a pocket of any size, a slit, a notch) the master lacks",
     "orphan": "a pixel unlike all 8 neighbours, in a colour pairing the master never has",
 }
 
@@ -243,6 +243,54 @@ def outer_edge(on: np.ndarray) -> np.ndarray:
     outside = np.isin(labels, border[border > 0])
     p = np.pad(outside, 1)
     return on & (p[:-2, 1:-1] | p[2:, 1:-1] | p[1:-1, :-2] | p[1:-1, 2:])
+
+
+def _gaps(on: np.ndarray) -> np.ndarray:
+    """Transparent pixels walled in: opaque on 3 or 4 sides, or inside a crack up to 2 px wide
+    in any direction (what a 3x3 closing of the silhouette fills), but not open bays wider
+    than that."""
+    p = np.pad(on, 2)
+    h, w = on.shape
+    grown = np.zeros_like(p)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            grown |= np.roll(np.roll(p, dy, 0), dx, 1)
+    closed = np.ones_like(p)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            closed &= np.roll(np.roll(grown, dy, 0), dx, 1)
+    closed = closed[2 : 2 + h, 2 : 2 + w]
+    return ~on & (closed | (_n4(on) >= 3))
+
+
+def _pockets(img: np.ndarray) -> list[tuple[np.ndarray, int, frozenset]]:
+    """Transparent regions the character walls in completely (not connected to the outside),
+    any size: (mask, pixels, colours of the wall)."""
+    on = _opaque(img)
+    labels, n = components(~on, diagonal=False)
+    border = set(np.unique(np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])).tolist())
+    p = pack(img)
+    out = []
+    for lab in range(1, n + 1):
+        if lab in border:
+            continue
+        m = labels == lab
+        q = np.pad(m, 1)
+        ring = on & (q[:-2, 1:-1] | q[2:, 1:-1] | q[1:-1, :-2] | q[1:-1, 2:])
+        out.append((m, int(m.sum()), frozenset(np.unique(p[ring]).tolist())))
+    return out
+
+
+def _gap_key(p: np.ndarray, on: np.ndarray, y: int, x: int) -> tuple:
+    """A gap judged by the colours walling it in (a slit between two strands of hair is design,
+    the same slit between a sleeve and the tunic is a crack)."""
+    h, w = on.shape
+    walls = frozenset(
+        int(p[yy, xx])
+        for yy, xx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1))
+        if 0 <= yy < h and 0 <= xx < w and on[yy, xx]
+    )
+    return walls
 
 
 def _shape_sig(on: np.ndarray) -> np.ndarray:
@@ -365,8 +413,8 @@ class _MasterModel:
         p = pack(m)
         sig = _shape_sig(on)
         self.spurs = _shape_set(m, on & (_n4(on) <= 1), sig)
-        holes = ~on & (_n4(on) >= 3)
-        self.holes = {s for s, _ in _shape_set(m, holes, sig)}
+        self.holes = {_gap_key(p, on, y, x) for y, x in zip(*np.nonzero(_gaps(on)), strict=False)}
+        self.pockets = [(size, walls) for _, size, walls in _pockets(m)]
         orphan, major = _orphans(m)
         self.orphan_pairs = {(int(p[y, x]), int(major[y, x])) for y, x in zip(*np.nonzero(orphan), strict=False)}
         edge = outer_edge(on)
@@ -378,18 +426,38 @@ class _MasterModel:
         labels, n = components(on, diagonal=True)
         sizes = np.bincount(labels.ravel())[1:] if n else np.array([])
         self.speck_sizes = {int(s) for s in sizes if s <= 4}
+        self.colors = {int(c) for c in cols}
+
+    def merge(self, other: _MasterModel) -> _MasterModel:
+        """Several key drawings (a transition's start and end): what any of them contains is
+        design; a colour is interior only if it is interior wherever it appears."""
+        self.spurs |= other.spurs
+        self.holes |= other.holes
+        self.pockets += other.pockets
+        self.orphan_pairs |= other.orphan_pairs
+        on_edge_here = self.colors - self.interior
+        on_edge_there = other.colors - other.interior
+        self.interior = (self.interior - on_edge_there) | (other.interior - on_edge_here)
+        for c, s in other.squares.items():
+            self.squares[c] = max(s, self.squares.get(c, 0))
+        self.speck_sizes |= other.speck_sizes
+        self.colors |= other.colors
+        return self
 
 
 def find_glitches(
     spr: Sprite,
     layer: str | None = None,
     frames: list[int] | None = None,
-    master: np.ndarray | None = None,
+    master: np.ndarray | list[np.ndarray] | None = None,
     loop: bool = False,
 ) -> dict:
     fs = frames or list(range(spr.frame_count))
     imgs = {f: render_frame(spr, f, [layer] if layer else None) for f in range(spr.frame_count)}
-    model = _MasterModel(master if master is not None else imgs[fs[0]])
+    masters = master if isinstance(master, list) else [master if master is not None else imgs[fs[0]]]
+    model = _MasterModel(masters[0])
+    for m in masters[1:]:
+        model.merge(_MasterModel(m))
     issues: list[dict] = []
     for f in fs:
         img = imgs[f]
@@ -461,11 +529,19 @@ def find_glitches(
             if (int(sig[y, x]), int(p[y, x])) not in model.spurs:
                 bad[y, x] = True
         issues += _boxes(bad, "spur", f + 1)
-        hole = ~on & (_n4(on) >= 3)
+        hole = _gaps(on)
         bad = np.zeros_like(on)
         for y, x in zip(*np.nonzero(hole), strict=False):
-            if int(sig[y, x]) not in model.holes:
+            if _gap_key(p, on, y, x) not in model.holes:
                 bad[y, x] = True
+        # whole pockets, any size: design only if a key drawing has one about as big between
+        # mostly the same colours
+        for m, size, walls in _pockets(img):
+            if not any(
+                abs(size - ms) <= max(2, ms // 2) and len(walls & mw) >= 0.6 * max(len(walls), 1)
+                for ms, mw in model.pockets
+            ):
+                bad |= m
         issues += _boxes(bad, "hole", f + 1)
         # orphans that persist across frames are texture; only new ones (unlike the neighbour
         # frames too) are noise that animating added

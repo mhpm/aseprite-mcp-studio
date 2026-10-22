@@ -726,23 +726,102 @@ def seal_cuts(spr, ctx, master_frame: int = 1, color: str | None = None, layer=N
     return _draw(spr, layer, frames_of(spr, frame, frames), False, paint)
 
 
-@op("kinds?=[stray, spur, hole, cut], master_frame?=1, layer?, frames?  (fix what find_glitches reports)")
-def fix_glitches(spr, ctx, kinds=None, master_frame: int = 1, layer=None, frame=None, frames=None):
-    """The safe fixes for find_glitches, repeated until nothing changes (at most 4 passes):
-    stray and spur pixels are erased, holes take their most common neighbour colour, cuts get
-    the outline drawn on their outer side. blip, block and orphan need judgement: they are
-    only reported."""
+def _fill_walled(
+    c: np.ndarray, box: tuple[int, int, int, int], ink: tuple, refs: list[np.ndarray] | None = None
+) -> int:
+    """Fill the walled-in transparency (pocket, slit, notch) inside box. First from the
+    neighbouring frames (onion skin): the one that agrees best with this frame around the gap
+    lends its pixels at the same place, so the fill has the real shading of that boot or cloth.
+    What is still empty fills from its edges inward with the commonest colour around it that is
+    not the outline `ink` (pants or boot, not a black blob), then that part is smoothed. Never
+    touches the transparency outside the character."""
+    from .review import _gaps, components
+
+    on = c[..., 3] > 0
+    labels, _ = components(~on, diagonal=False)
+    border = np.unique(np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]]))
+    walled = (~on & ~np.isin(labels, border[border > 0])) | _gaps(on)
+    x, y, w, h = box
+    todo = np.zeros_like(on)
+    todo[y : y + h, x : x + w] = walled[y : y + h, x : x + w]
+    ink = np.array(ink[:3], np.uint8)
+
+    def body_colour(yy: int, xx: int, fallback: bool) -> np.ndarray | None:
+        # the commonest non-outline colour within 1 px, else within 2 px, else (fallback) any
+        for r in (1, 2):
+            nb = c[max(0, yy - r) : yy + r + 1, max(0, xx - r) : xx + r + 1].reshape(-1, 4)
+            nb = nb[nb[:, 3] > 0]
+            body = nb[(nb[:, :3] != ink).any(1)]
+            if len(body):
+                vals, cnt = np.unique(body, axis=0, return_counts=True)
+                return vals[cnt.argmax()]
+        if fallback and len(nb):
+            vals, cnt = np.unique(nb, axis=0, return_counts=True)
+            return vals[cnt.argmax()]
+        return None
+
+    lend = np.zeros_like(on)
+    if refs:
+        ring = np.zeros_like(on)
+        ring[max(0, y - 2) : y + h + 2, max(0, x - 2) : x + w + 2] = True
+        ring &= on
+        best = max(refs, key=lambda r: int(((r == c).all(-1) & ring).sum()))
+        # borrow only colours that already wall this gap in (boot and pants, not the tunic of a
+        # neighbour frame where something else stood at that spot)
+        from .raster import pack
+
+        around = np.unique(pack(c)[ring])
+        lend = todo & (best[..., 3] > 0) & np.isin(pack(best), around)
+        c[lend] = best[lend]
+        todo &= ~lend
+    smooth = np.zeros_like(on)
+    while todo.any():
+        ready = []
+        for yy, xx in zip(*np.nonzero(todo), strict=False):
+            ring = c[max(0, yy - 1) : yy + 2, max(0, xx - 1) : xx + 2, 3] > 0
+            if ring.any():
+                col = body_colour(yy, xx, fallback=True)
+                if col is not None:
+                    ready.append((yy, xx, col))
+        if not ready:
+            break
+        for yy, xx, col in ready:  # one ring at a time, so the fill grows evenly from the walls
+            c[yy, xx] = col
+            todo[yy, xx] = False
+            smooth[yy, xx] = True
+    # smooth what was invented: each pixel takes the commonest body colour around it, so the
+    # fill reads as cloth or leather, not as stray outline lines
+    for _ in range(2):
+        for yy, xx in zip(*np.nonzero(smooth), strict=False):
+            col = body_colour(yy, xx, fallback=False)
+            if col is not None:
+                c[yy, xx] = col
+    return int(lend.sum() + smooth.sum())
+
+
+@op("kinds?=[stray, spur, hole, cut, block], master_frame?=1, master_frames? (key drawings), layer?, frames?")
+def fix_glitches(spr, ctx, kinds=None, master_frame: int = 1, master_frames=None, layer=None, frame=None, frames=None):
+    """The safe fixes for find_glitches, repeated until nothing changes (at most 8 passes):
+    stray and spur pixels are erased, walled-in transparency (pockets, slits) is filled from its
+    edges with the colours around it, cuts get the outline drawn on their outer side, and blobs
+    of outline colour are opened and refilled. blip, orphan and blocks of other colours need
+    judgement: they are only reported."""
     from .review import find_glitches
 
-    kinds = set(kinds or ["stray", "spur", "hole", "cut"])
-    bad = kinds - {"stray", "spur", "hole", "cut"}
+    kinds = set(kinds or ["stray", "spur", "hole", "cut", "block"])
+    bad = kinds - {"stray", "spur", "hole", "cut", "block"}
     if bad:
-        raise StudioError(f"fix_glitches fixes stray, spur, hole and cut, not {sorted(bad)}")
+        raise StudioError(f"fix_glitches fixes stray, spur, hole, cut and outline blocks, not {sorted(bad)}")
     la = spr.image_layer(layer)
     fs = frames_of(spr, frame, frames)
-    master = spr.canvas_of(la, spr.check_frame(master_frame))
+    keys = frames_of(spr, frames=master_frames) if master_frames else [spr.check_frame(master_frame)]
+    master = [spr.canvas_of(la, k) for k in keys]
+    from .color import rgb_to_oklab
+
+    m0 = master[0][master[0][..., 3] > 0][:, :3]
+    ink = tuple(m0[rgb_to_oklab(m0.astype(float))[:, 0].argmin()]) if len(m0) else (0, 0, 0)
     fixed: dict = {}
-    for _ in range(4):
+    for _ in range(8):
         found = [d for d in find_glitches(spr, la.path, fs, master)["issues"] if d["kind"] in kinds]
         if not found:
             break
@@ -751,11 +830,8 @@ def fix_glitches(spr, ctx, kinds=None, master_frame: int = 1, layer=None, frame=
             by_frame.setdefault(d["frame"] - 1, []).append(d)
         changed = 0
         for f, items in by_frame.items():
-            if "cut" in {d["kind"] for d in items}:
-                changed += seal_cuts(spr, ctx, master_frame=master_frame, layer=la.path, frames=[f + 1])[
-                    "pixels_written"
-                ]
             s = Surface(spr, la, f)
+            refs = [spr.canvas_of(la, g) for g in (f - 1, f + 1) if 0 <= g < spr.frame_count and la.cels.get(g)]
             for d in items:
                 if d["kind"] in ("stray", "spur"):
                     v = s.view(d["x"], d["y"], d["w"], d["h"])
@@ -769,22 +845,31 @@ def fix_glitches(spr, ctx, kinds=None, master_frame: int = 1, layer=None, frame=
                     v[lone] = 0
                     s.written += int(lone.sum())
                 elif d["kind"] == "hole":
+                    s.written += _fill_walled(s.canvas(), (d["x"], d["y"], d["w"], d["h"]), ink, refs)
+                elif d["kind"] == "block":
+                    # only a blob of outline colour is safe to open: its inside (outline pixels
+                    # with outline all round) is cleared and refilled from the colours around it
                     c = s.canvas()
-                    for yy in range(d["y"], d["y"] + d["h"]):
-                        for xx in range(d["x"], d["x"] + d["w"]):
-                            if c[yy, xx, 3]:
-                                continue
-                            nb = [
-                                tuple(c[y2, x2])
-                                for y2, x2 in ((yy - 1, xx), (yy + 1, xx), (yy, xx - 1), (yy, xx + 1))
-                                if 0 <= y2 < c.shape[0] and 0 <= x2 < c.shape[1] and c[y2, x2, 3]
-                            ]
-                            if nb:
-                                vals, cnt = np.unique(np.array(nb), axis=0, return_counts=True)
-                                c[yy, xx] = vals[cnt.argmax()]
-                                s.written += 1
+                    x, y, w, h = d["x"], d["y"], d["w"], d["h"]
+                    is_ink = (c[..., :3] == np.array(ink[:3], np.uint8)).all(-1) & (c[..., 3] > 0)
+                    pad = np.pad(is_ink, 1)
+                    core = np.ones_like(is_ink)
+                    for dy in (-1, 0, 1):
+                        for dx in (-1, 0, 1):
+                            core &= pad[1 + dy : 1 + dy + is_ink.shape[0], 1 + dx : 1 + dx + is_ink.shape[1]]
+                    box = np.zeros_like(core)
+                    box[y : y + h, x : x + w] = True
+                    core &= box
+                    if core.any():
+                        c[core] = 0
+                        # no borrowing here: the neighbour frames have the outline at that spot
+                        s.written += _fill_walled(c, (x, y, w, h), ink)
             r = s.commit()
             changed += r["pixels_written"]
+            # cuts last: sealing first would wall in gaps that the hole fill then reopens
+            if "cut" in {d["kind"] for d in items}:
+                sealed = seal_cuts(spr, ctx, master_frame=keys[0] + 1, layer=la.path, frames=[f + 1])
+                changed += sealed["pixels_written"]
             for d in items:
                 fixed.setdefault(d["frame"], {}).setdefault(d["kind"], 0)
                 fixed[d["frame"]][d["kind"]] += 1
