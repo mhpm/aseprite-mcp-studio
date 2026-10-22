@@ -317,6 +317,84 @@ def test_direct_buffer_ops_report_pixels_written(tmp_path):
         ],
     )
     assert [x["pixels_written"] for x in r["results"]] == [8, 4, 16, 0]
+
+
+def _glitch_sprite(tmp_path):
+    """A 3-frame outlined block that moves 1 px per frame (a clean animation)."""
+    f = str(tmp_path / "g.aseprite")
+    server.sprite_new(f, 24, 16, frames=3)
+    for k in range(3):
+        server.apply(
+            f,
+            [
+                {
+                    "op": "rect",
+                    "x": 4 + k,
+                    "y": 3,
+                    "w": 10,
+                    "h": 9,
+                    "color": "#14141e",
+                    "fill": True,
+                    "frames": [k + 1],
+                },
+                {"op": "rect", "x": 5 + k, "y": 4, "w": 8, "h": 7, "color": "#3c6ec8", "fill": True, "frames": [k + 1]},
+                {"op": "rect", "x": 6 + k, "y": 5, "w": 3, "h": 2, "color": "#f0c8a0", "fill": True, "frames": [k + 1]},
+            ],
+        )
+    return f
+
+
+_BREAK_FRAME_2 = [
+    {"op": "pixels", "points": [[20, 1]], "color": "#14141e", "frames": [2]},  # stray
+    {"op": "pixels", "points": [[15, 7]], "color": "#14141e", "frames": [2]},  # spur
+    {"op": "erase", "x": 14, "y": 6, "w": 1, "h": 3, "frames": [2]},  # cut: interior left on the edge
+    {"op": "erase", "x": 9, "y": 8, "w": 1, "h": 1, "frames": [2]},  # hole
+]
+
+
+def test_find_glitches_clean_motion_is_ok(tmp_path):
+    res = server.find_glitches(_glitch_sprite(tmp_path), loop=True)
+    assert res[0]["ok"], res[0]["issues"]
+    assert len(res) == 1  # no view when there is nothing to show
+
+
+def test_find_glitches_finds_each_kind(tmp_path):
+    f = _glitch_sprite(tmp_path)
+    server.apply(f, _BREAK_FRAME_2)
+    res = server.find_glitches(f)
+    kinds = {d["kind"] for d in res[0]["issues"] if d["frame"] == 2}
+    assert {"stray", "spur", "cut", "hole"} <= kinds
+    assert not [d for d in res[0]["issues"] if d["frame"] != 2]
+    assert res[1].data[:4] == b"\x89PNG"  # the marked onion-skin view
+
+
+def test_block_is_a_fill_larger_than_the_master_has(tmp_path):
+    f = _glitch_sprite(tmp_path)
+    # the master's skin patch is 3x2; a 5x5 skin fill in frame 3 is an unnatural block
+    server.apply(f, [{"op": "rect", "x": 7, "y": 5, "w": 5, "h": 5, "color": "#f0c8a0", "fill": True, "frames": [3]}])
+    issues = server.find_glitches(f)[0]["issues"]
+    blocks = [d for d in issues if d["kind"] == "block"]
+    assert [(d["frame"], d["w"], type(d["x"])) for d in blocks] == [(3, 5, int)]
+
+
+def test_blip_is_a_flicker_against_both_neighbours(tmp_path):
+    f = _glitch_sprite(tmp_path)
+    server.apply(f, [{"op": "pixels", "points": [[11, 9]], "color": "#f0c8a0", "frames": [2]}])
+    issues = server.find_glitches(f)[0]["issues"]
+    blips = [d for d in issues if d["kind"] == "blip"]
+    assert [(d["frame"], d["x"], d["y"]) for d in blips] == [(2, 11, 9)]
+    assert blips[0]["note"] == "unlike frames 1 and 3"
+
+
+def test_fix_glitches_cleans_the_safe_kinds(tmp_path):
+    f = _glitch_sprite(tmp_path)
+    server.apply(f, _BREAK_FRAME_2)
+    r = server.apply(f, [{"op": "fix_glitches", "frames": [2]}])["results"][0]
+    assert r["fixed"][2]["stray"] and r["fixed"][2]["hole"]
+    assert server.find_glitches(f)[0]["ok"]
+
+
+def test_damage_number_rises_and_fades(tmp_path):
     f = str(tmp_path / "d.aseprite")
     server.sprite_new(f, 40, 30, frames=6)
     r = server.apply(f, [{"op": "damage_number", "text": "-12", "x": 20, "y": 25, "frames": "1-6", "rise": 10}])

@@ -276,9 +276,12 @@ def view_image(
     onion: bool = False,
     layers=None,
     max_side: int = 1600,
+    marks: dict | None = None,
 ) -> bytes:
     """One PNG laying out frames side by side, each over a checkerboard with an optional
-    pixel grid (darker every 8 px), coordinate rulers in sprite pixels and a title."""
+    pixel grid (darker every 8 px), coordinate rulers in sprite pixels and a title.
+    marks: {0-based frame: [(x, y, w, h, label, rgba), ...]} draws a box round each area
+    (sprite coordinates) with its label above it."""
     x0, y0, w, h = region if region else (0, 0, spr.width, spr.height)
     cols = min(4, len(frames))
     rows_n = int(np.ceil(len(frames) / cols))
@@ -332,6 +335,19 @@ def view_image(
                 row = g[gy * scale, :]
                 g[gy * scale, :] = row + (np.array([60, 60, 90, 255]) - row) * k
             tile = g.clip(0, 255).astype(np.uint8)
+        for mx, my, mw, mh, label, rgba in (marks or {}).get(f, []):
+            # 2 px frame just outside the area, so the marked pixels stay visible
+            bx0, by0 = (mx - x0) * scale - 2, (my - y0) * scale - 2
+            bx1, by1 = (mx - x0 + mw) * scale + 1, (my - y0 + mh) * scale + 1
+            th, tw = tile.shape[:2]
+            for t in range(2):
+                for yy in (by0 + t, by1 - t):
+                    if 0 <= yy < th:
+                        tile[yy, max(0, bx0) : max(0, min(tw, bx1 + 1))] = rgba
+                for xx in (bx0 + t, bx1 - t):
+                    if 0 <= xx < tw:
+                        tile[max(0, by0) : max(0, min(th, by1 + 1)), xx] = rgba
+            _stamp(tile, render_text(label, rgba), max(0, bx0), max(0, by0 - 7))
         page[oy + title + ruler : oy + title + ruler + h * scale, ox + ruler : ox + ruler + w * scale] = tile
         _stamp(page, render_text(f"F{f + 1} {spr.durations[f]}MS", ink), ox + ruler, oy + 1)
         if rulers:

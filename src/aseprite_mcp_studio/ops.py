@@ -692,6 +692,108 @@ def flash(spr, ctx, color: str = "#ffffff", amount: float = 1.0, layer=None, fra
     return _draw(spr, layer, frames_of(spr, frame, frames), False, paint)
 
 
+@op(
+    "master_frame?=1, color? (default: the master's darkest colour), layer?, frames?  (outline what animating cut open)"
+)
+def seal_cuts(spr, ctx, master_frame: int = 1, color: str | None = None, layer=None, frame=None, frames=None):
+    """Where interior colours lie on the outer edge (colours the master frame keeps inside its
+    outline), draw the outline on the transparent side, as the master does."""
+    from .color import rgb_to_oklab
+    from .raster import pack as _pack
+    from .review import _MasterModel, outer_edge
+
+    la = spr.image_layer(layer)
+    m = spr.canvas_of(la, spr.check_frame(master_frame))
+    model = _MasterModel(m)
+    if color is None:
+        on_m = m[..., 3] > 0
+        cols = np.unique(m[on_m][:, :3], axis=0)
+        ink = (*cols[rgb_to_oklab(cols.astype(float))[:, 0].argmin()], 255)
+    else:
+        ink = parse(color)
+    interior = np.array(sorted(model.interior), np.uint32)
+
+    def paint(s: Surface, f: int):
+        s.ensure(s.x0 - 1, s.y0 - 1, s.x0 + s.buf.shape[1] + 1, s.y0 + s.buf.shape[0] + 1)
+        on = s.buf[..., 3] > 0
+        cut = outer_edge(on) & np.isin(_pack(s.buf), interior)
+        c = np.pad(cut, 1)
+        h, w = on.shape
+        near = c[:-2, 1:-1] | c[2:, 1:-1] | c[1:-1, :-2] | c[1:-1, 2:]
+        ys, xs = np.nonzero(near & ~on)
+        s.plot(xs + s.x0, ys + s.y0, ink)
+
+    return _draw(spr, layer, frames_of(spr, frame, frames), False, paint)
+
+
+@op("kinds?=[stray, spur, hole, cut], master_frame?=1, layer?, frames?  (fix what find_glitches reports)")
+def fix_glitches(spr, ctx, kinds=None, master_frame: int = 1, layer=None, frame=None, frames=None):
+    """The safe fixes for find_glitches, repeated until nothing changes (at most 4 passes):
+    stray and spur pixels are erased, holes take their most common neighbour colour, cuts get
+    the outline drawn on their outer side. blip, block and orphan need judgement: they are
+    only reported."""
+    from .review import find_glitches
+
+    kinds = set(kinds or ["stray", "spur", "hole", "cut"])
+    bad = kinds - {"stray", "spur", "hole", "cut"}
+    if bad:
+        raise StudioError(f"fix_glitches fixes stray, spur, hole and cut, not {sorted(bad)}")
+    la = spr.image_layer(layer)
+    fs = frames_of(spr, frame, frames)
+    master = spr.canvas_of(la, spr.check_frame(master_frame))
+    fixed: dict = {}
+    for _ in range(4):
+        found = [d for d in find_glitches(spr, la.path, fs, master)["issues"] if d["kind"] in kinds]
+        if not found:
+            break
+        by_frame: dict = {}
+        for d in found:
+            by_frame.setdefault(d["frame"] - 1, []).append(d)
+        changed = 0
+        for f, items in by_frame.items():
+            if "cut" in {d["kind"] for d in items}:
+                changed += seal_cuts(spr, ctx, master_frame=master_frame, layer=la.path, frames=[f + 1])[
+                    "pixels_written"
+                ]
+            s = Surface(spr, la, f)
+            for d in items:
+                if d["kind"] in ("stray", "spur"):
+                    v = s.view(d["x"], d["y"], d["w"], d["h"])
+                    # only the flagged pixels' own shape: a 2x2 box may hold body pixels too
+                    region = s.canvas()[d["y"] : d["y"] + d["h"], d["x"] : d["x"] + d["w"]]
+                    lone = region[..., 3] > 0
+                    if d["kind"] == "spur":
+                        from .review import _n4
+
+                        lone &= _n4(s.canvas()[..., 3] > 0)[d["y"] : d["y"] + d["h"], d["x"] : d["x"] + d["w"]] <= 1
+                    v[lone] = 0
+                    s.written += int(lone.sum())
+                elif d["kind"] == "hole":
+                    c = s.canvas()
+                    for yy in range(d["y"], d["y"] + d["h"]):
+                        for xx in range(d["x"], d["x"] + d["w"]):
+                            if c[yy, xx, 3]:
+                                continue
+                            nb = [
+                                tuple(c[y2, x2])
+                                for y2, x2 in ((yy - 1, xx), (yy + 1, xx), (yy, xx - 1), (yy, xx + 1))
+                                if 0 <= y2 < c.shape[0] and 0 <= x2 < c.shape[1] and c[y2, x2, 3]
+                            ]
+                            if nb:
+                                vals, cnt = np.unique(np.array(nb), axis=0, return_counts=True)
+                                c[yy, xx] = vals[cnt.argmax()]
+                                s.written += 1
+            r = s.commit()
+            changed += r["pixels_written"]
+            for d in items:
+                fixed.setdefault(d["frame"], {}).setdefault(d["kind"], 0)
+                fixed[d["frame"]][d["kind"]] += 1
+        if not changed:
+            break
+    left = find_glitches(spr, la.path, fs, master)
+    return {"layer": la.path, "fixed": fixed, "left": left["per_frame"]}
+
+
 @op("axis?=h|v, center? (canvas x for h, y for v; default canvas middle), layer?, frames?")
 def flip(spr, ctx, axis: str = "h", center: float | None = None, layer=None, frame=None, frames=None):
     la = spr.image_layer(layer)

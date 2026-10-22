@@ -277,6 +277,71 @@ def check_animation(
     return review.check_animation(spr, kind, layer, fs)
 
 
+_GLITCH_COLORS = {
+    "cut": (230, 20, 120, 255),
+    "block": (255, 120, 0, 255),
+    "blip": (150, 40, 230, 255),
+    "stray": (0, 170, 90, 255),
+    "spur": (0, 120, 220, 255),
+    "hole": (200, 160, 0, 255),
+    "orphan": (90, 90, 110, 255),
+}
+
+
+@tool
+def find_glitches(
+    path: str,
+    layer: str | None = None,
+    master: str | None = None,
+    frames: Any = None,
+    loop: bool = False,
+    master_frame: int = 1,
+) -> list:
+    """Find what animating broke, frame by frame, with an onion-skin view of every frame that
+    has a problem (previous frame red, next blue, each problem boxed and labelled).
+    Each frame is compared with its previous and next frame (loop=true wraps round) and with
+    the master (default: the first frame), so the design's own details are not reported.
+    Kinds: cut (a part sliced open: interior colours on the outer edge), block (a flat fill
+    larger than the master has), blip (a small patch unlike both neighbour frames), stray
+    (a detached speck), spur (a single pixel sticking out), hole (an enclosed gap), orphan
+    (a pixel unlike all its neighbours). Run it after every animate/edit pass; fix until ok."""
+    _, spr = store.load(path)
+    fs = _frames(spr, frames) if frames else None
+    m = _load_rgba(master, master_frame) if master else None
+    res = review.find_glitches(spr, layer, fs, m, loop)
+    marks: dict = {}
+    for d in res["issues"]:
+        marks.setdefault(d["frame"] - 1, []).append(
+            (d["x"], d["y"], d["w"], d["h"], d["kind"].upper(), _GLITCH_COLORS[d["kind"]])
+        )
+    shown = sorted(marks)[:16]
+    out: list = [res]
+    if shown:
+        # zoom on the layer's content over all frames, with a small margin
+        boxes = [
+            review._frame_stats(render.render_frame(spr, f, [layer] if layer else None)) for f in range(spr.frame_count)
+        ]
+        boxes = [b["bbox"] for b in boxes if b]
+        x0 = max(0, min(b[0] for b in boxes) - 2)
+        y0 = max(0, min(b[1] for b in boxes) - 4)
+        x1 = min(spr.width, max(b[0] + b[2] for b in boxes) + 2)
+        y1 = min(spr.height, max(b[1] + b[3] for b in boxes) + 2)
+        data = render.view_image(
+            spr,
+            shown,
+            0,
+            (x0, y0, x1 - x0, y1 - y0),
+            "color",
+            True,
+            True,
+            True,
+            [layer] if layer else None,
+            marks=marks,
+        )
+        out.append(Image(data=data, format="png"))
+    return out
+
+
 @tool
 def check_identity(path: str, master: str, layer: str | None = None, frames: Any = None, master_frame: int = 1) -> dict:
     """Compare every frame with a master image (png or .aseprite): share of pixels that are

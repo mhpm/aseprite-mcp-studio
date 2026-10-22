@@ -27,7 +27,7 @@ What it is for:
 | Pixelize | FFT autocorrelation for the cell size, dynamic-programming grid fitting that follows drift, perceptual-mode cell sampling (no muddy averages), agglomerative OKLab palette reduction that keeps small deliberate accents, background removal, speck and orphan cleanup that never eats eyes or highlights. |
 | Animation | Cut-out rigs (rect / polygon / character-map / colour masks), parent chains, RotSprite rotation (colour-safe, line-safe), joint overlap fill, keyframe interpolation, presets, hit flash. |
 | Text | Built-in bitmap fonts (`tiny` 3x5 with A–Z and punctuation, `bold` 5x7 numbers) with outline, shadow and two-tone fill, crisp at 1x. One op makes a popping, rising, fading damage number. |
-| Review | `view` (many frames, grid, rulers, onion skin, value and silhouette modes), `lint` (orphan, lone and detached pixels with coordinates), `check_animation` (aware of loop / one-shot / scene), `check_identity` (palette and proportion drift against a master), `compare`. |
+| Review | `view` (many frames, grid, rulers, onion skin, value and silhouette modes), `lint` (orphan, lone and detached pixels with coordinates), `check_animation` (aware of loop / one-shot / scene), `check_identity` (palette and proportion drift against a master), `find_glitches` (each frame against its previous and next frame and the master, with a marked onion-skin view), `compare`. |
 | Safe | Paths are confined to allowed roots. Writes are atomic (temp file + rename), so a crash never leaves half a file. |
 
 ## Install
@@ -74,6 +74,7 @@ Environment:
 | `lint` | Orphan, lone and detached pixels with coordinates; colour stats. |
 | `check_animation` | Bounds, ground row, holds, drift, spacing; `loop` / `oneshot` / `scene`. |
 | `check_identity` | Each frame against a master: palette conformance and size drift. |
+| `find_glitches` | What animating broke, per frame: cuts, flat blocks, one-frame flicker (against the previous and next frame, motion compensated), strays, spurs, holes, orphans; the design's own details (judged against the master) are not reported. Returns an onion-skin view with each problem boxed. |
 | `compare` | Pixel diff between frames or files. |
 | `pixelize` | Image to native pixel art, with a side-by-side preview. |
 | `import_strip` | A strip of poses brought in at the master's scale, palette and ground. |
@@ -91,6 +92,7 @@ Tags and slices: `add_tag`, `remove_tag`, `add_slice`, `remove_slice`.
 Cels: `copy_cel`, `move_cel`, `set_cel`, `clear`, `link_cels`, `unlink_cels`.
 Drawing: `pixels`, `map`, `line`, `polyline`, `curve`, `rect`, `ellipse`, `fill`, `text`, `stamp`, `erase`, `outline`.
 Colour: `replace_color`, `remap`, `flash`, `palette_lock`, `set_palette`, `clean`.
+Repair: `fix_glitches` (erases strays and spurs, fills holes, outlines cuts, until `find_glitches` finds none), `seal_cuts`.
 Transform: `flip`, `rotate` (RotSprite), `scale`, `squash_stretch`.
 Motion and FX: `tween_move`, `shake`, `fade`, `damage_number`, `blink_flash`.
 
@@ -113,7 +115,8 @@ on many frames at once. Add `lock_alpha: true` to paint only over existing pixel
    For a painted image with no grid, pass `target_height`.
 2. `rig_preview("hero.aseprite", rig)`: adjust the masks and pivots until each part is clean.
 3. `animate_rig("hero.aseprite", rig, out_layer="idle", preset="idle", source_layer="sprite")`.
-4. `check_animation(..., kind="loop")`, `check_identity(..., master="hero.aseprite")`, then `view(..., onion=true)`.
+4. `find_glitches("hero.aseprite", layer="idle", loop=true)`, then `apply` op `fix_glitches` and check again.
+   `check_animation(..., kind="loop")`, `check_identity(..., master="hero.aseprite")`, then `view(..., onion=true)`.
 5. `export("hero.aseprite", "hero_idle.gif", scale=4)`.
 
 ## Development
