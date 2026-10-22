@@ -35,9 +35,10 @@ aside.right{border-right:0;border-left:1px solid var(--line);padding:10px;displa
 main{display:flex;flex-direction:column;min-width:0;min-height:0}
 .bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:6px 8px;background:var(--panel);border-bottom:1px solid var(--line)}
 .bar .sep{width:1px;height:20px;background:var(--line);margin:0 3px}
-#stageWrap{flex:1;overflow:auto;position:relative;background:var(--bg);cursor:crosshair}
-#stageWrap.view{cursor:grab}
-#stage{display:block;margin:auto;image-rendering:pixelated}
+#stageWrap{flex:1;overflow:hidden;position:relative;background:var(--bg);cursor:crosshair;touch-action:none}
+#stageWrap.view,#stageWrap.space{cursor:grab}
+#stageWrap.dragging{cursor:grabbing}
+#stage{position:absolute;left:50%;top:50%;image-rendering:pixelated}
 #hud{position:absolute;left:8px;bottom:6px;color:var(--dim);font-size:12px;pointer-events:none;background:rgba(0,0,0,.35);padding:2px 6px;border-radius:4px}
 #toast{position:fixed;right:320px;top:52px;background:var(--panel2);border:1px solid var(--accent2);padding:6px 10px;border-radius:6px;opacity:0;transition:opacity .25s;pointer-events:none}
 #toast.show{opacity:1}
@@ -155,7 +156,7 @@ const T = {
     selSome:(f,m)=>`Frames: ${f||"—"} · marked pixels: ${m}`,view:"View",resolve:"Resolve",reopen:"Reopen",del:"Delete",
     open:"open",resolved:"resolved",reply:"Agent",saved:"Note saved",updated:"Updated",live:"live",off:"disconnected",
     current:"current",allFrames:"all frames",noFrames:"Select at least one frame or paint on one",allLayers:"all layers",
-    help:"V move · B brush · R box · E eraser · Space play · ←/→ frame · S select frame · O onion · G grid · X glitches · M notes · D compare · 1-9 zoom · N save note · Esc clear · Ctrl+Z undo · Ctrl+Y redo"},
+    help:"V move · B brush · R box · E eraser · Space play (hold: drag) · wheel zoom · ←/→ frame · S select frame · O onion · G grid · X glitches · M notes · D compare · 1-9 zoom · N save note · Esc clear · Ctrl+Z undo · Ctrl+Y redo"},
   es: {version:"Versión",vdiff:"Δ con la actual",tView:"Mover",tBrush:"Pincel",tRect:"Recuadro",tErase:"Borrador",fit:"Ajustar",
     bgCheckerDark:"Cuadros oscuros",bgChecker:"Cuadros claros",bgGreen:"Verde",bgDark:"Oscuro",bgLight:"Claro",grid:"Cuadrícula",onion:"Onion",glitches:"Errores",
     notesOv:"Notas",cmpOff:"Comparar: no",cmpSide:"Lado a lado",cmpDiff:"Diferencia",cmpBlink:"Parpadeo",with:"con",
@@ -165,7 +166,7 @@ const T = {
     selSome:(f,m)=>`Cuadros: ${f||"—"} · píxeles marcados: ${m}`,view:"Ver",resolve:"Resolver",reopen:"Reabrir",del:"Borrar",
     open:"abierta",resolved:"resuelta",reply:"Agente",saved:"Nota guardada",updated:"Actualizado",live:"en vivo",off:"desconectado",
     current:"actual",allFrames:"todos los cuadros",noFrames:"Selecciona al menos un cuadro o pinta en uno",allLayers:"todas las capas",
-    help:"V mover · B pincel · R recuadro · E borrador · Espacio reproducir · ←/→ cuadro · S seleccionar cuadro · O onion · G cuadrícula · X errores · M notas · D comparar · 1-9 zoom · N guardar nota · Esc limpiar · Ctrl+Z deshacer · Ctrl+Y rehacer"},
+    help:"V mover · B pincel · R recuadro · E borrador · Espacio reproducir (mantener: arrastrar) · rueda zoom · ←/→ cuadro · S seleccionar cuadro · O onion · G cuadrícula · X errores · M notas · D comparar · 1-9 zoom · N guardar nota · Esc limpiar · Ctrl+Z deshacer · Ctrl+Y rehacer"},
 };
 const LANG = (navigator.language||"en").toLowerCase().startsWith("es") ? "es" : "en";
 const t = k => T[LANG][k] ?? T.en[k] ?? k;
@@ -179,7 +180,7 @@ const SERIOUS = new Set(["cut","block","stray","spur","hole"]);
 // ------------------------------------------------------------------ state
 const S = {
   files:[], file:null, info:null, strip:null, stripV:null, current:null, cur:0, playing:false, timer:null,
-  zoom:6, bg:"checkerDark", grid:true, onion:true, glitchOn:true, notesOn:true, tool:"brush", brush:2,
+  zoom:6, panX:0, panY:0, bg:"checkerDark", grid:true, onion:true, glitchOn:true, notesOn:true, tool:"brush", brush:2,
   selected:new Set(), anchor:null, marks:new Map(), tags:new Set(), notes:[], glitches:null,
   cmp:"off", cmpOther:1, blinkOn:false, viewV:null, vdiff:false, layer:"", pingDir:1,
 };
@@ -307,6 +308,7 @@ function draw(){
   const {width:w, height:h, frames:n} = S.info, z = S.zoom, f = S.cur;
   const side = S.cmp === "side";
   stage.width = w*z*(side?2:1) + (side?8:0); stage.height = h*z;
+  placeStage();
   ctx.imageSmoothingEnabled = false;
   let shown = f;
   if (S.cmp === "blink" && S.blinkOn) shown = clampFrame(S.cmpOther-1);
@@ -446,34 +448,49 @@ function strokeTo(p, erase){
   lastPaint = p;
 }
 function rectNorm(){ const [a,b] = rectDrag; return {x:Math.min(a[0],b[0]), y:Math.min(a[1],b[1]), w:Math.abs(a[0]-b[0])+1, h:Math.abs(a[1]-b[1])+1}; }
-stage.addEventListener("pointerdown", e => {
+$("stageWrap").addEventListener("pointerdown", e => {
   if (!S.info) return; stop(); const p = spriteXY(e);
-  if (S.tool === "view" || e.button === 1){ panning = [e.clientX, e.clientY, $("stageWrap").scrollLeft, $("stageWrap").scrollTop]; return; }
+  if (S.tool === "view" || e.button === 1 || spaceHeld){ startPan(e); return; }
   if (!p || S.cmp === "side") return;
-  stage.setPointerCapture(e.pointerId);
+  $("stageWrap").setPointerCapture(e.pointerId);
   pushUndo();
   if (S.tool === "rect"){ rectDrag = [p, p]; }
   else { painting = true; lastPaint = p; paintAt(p, S.tool === "erase" || e.button === 2); }
   draw();
 });
-stage.addEventListener("pointermove", e => {
+$("stageWrap").addEventListener("pointermove", e => {
   if (!S.info) return; const p = spriteXY(e); hover = p;
-  if (panning){ const w=$("stageWrap"); w.scrollLeft = panning[2]-(e.clientX-panning[0]); w.scrollTop = panning[3]-(e.clientY-panning[1]); return; }
+  if (panning){ movePan(e); return; }
   if (rectDrag && p) rectDrag[1] = p;
   if (painting && p){ strokeTo(p, S.tool === "erase" || (e.buttons & 2)); }
   draw();
 });
 window.addEventListener("pointerup", () => {
-  panning = null;
+  if (panning){ panning = null; $("stageWrap").classList.remove("dragging"); }
   if (rectDrag){ const r = rectNorm(); const set = S.marks.get(S.cur) || new Set();
     for (let y=r.y; y<r.y+r.h; y++) for (let x=r.x; x<r.x+r.w; x++) set.add(x+","+y);
     S.marks.set(S.cur, set); S.selected.add(S.cur); rectDrag = null; buildTimeline(); }
   if (painting){ painting = false; lastPaint = null; buildTimeline(); }
   draw();
 });
-stage.addEventListener("contextmenu", e => e.preventDefault());
-stage.addEventListener("pointerleave", () => { hover = null; draw(); });
-$("stageWrap").addEventListener("wheel", e => { if (!e.ctrlKey) return; e.preventDefault(); setZoom(S.zoom + (e.deltaY < 0 ? 1 : -1)); }, {passive:false});
+$("stageWrap").addEventListener("contextmenu", e => e.preventDefault());
+$("stageWrap").addEventListener("pointerleave", () => { hover = null; draw(); });
+// the wheel zooms, keeping the pixel under the cursor where it is
+$("stageWrap").addEventListener("wheel", e => {
+  if (!S.info) return; e.preventDefault();
+  const step = Math.max(1, Math.round(S.zoom * 0.15)), z0 = S.zoom;
+  const z1 = Math.max(1, Math.min(40, z0 + (e.deltaY < 0 ? step : -step))); if (z1 === z0) return;
+  const r = $("stageWrap").getBoundingClientRect();
+  const cx = e.clientX - (r.left + r.width/2), cy = e.clientY - (r.top + r.height/2);
+  S.panX = cx - (cx - S.panX) * z1 / z0; S.panY = cy - (cy - S.panY) * z1 / z0;
+  setZoom(z1);
+}, {passive:false});
+// the view moves by an offset (like Aseprite), so the drawing can be dragged anywhere
+// (the Move tool, the middle button, or holding Space)
+function placeStage(){ stage.style.transform = `translate(${Math.round(-stage.width/2 + S.panX)}px, ${Math.round(-stage.height/2 + S.panY)}px)`; }
+function startPan(e){ $("stageWrap").setPointerCapture(e.pointerId); panning = [e.clientX, e.clientY, S.panX, S.panY]; spaceUsed = true; $("stageWrap").classList.add("dragging"); }
+function movePan(e){ S.panX = panning[2] + e.clientX - panning[0]; S.panY = panning[3] + e.clientY - panning[1]; placeStage(); }
+let spaceHeld = false, spaceUsed = false;
 
 // ------------------------------------------------------------------ notes
 async function saveNote(){
@@ -513,6 +530,7 @@ let autoFit = true;
 function setZoom(z, manual=true){ if (manual) autoFit = false; S.zoom = Math.max(1, Math.min(40, z)); $("zoomLab").textContent = S.zoom+"×"; draw(); }
 function fit(){ if (!S.info) return; const w = $("stageWrap"); const k = S.cmp==="side"?2:1;
   if (!w.clientWidth || !w.clientHeight) return;
+  S.panX = 0; S.panY = 0;
   setZoom(Math.max(1, Math.floor(Math.min((w.clientWidth-16)/(S.info.width*k), (w.clientHeight-16)/S.info.height))), false); }
 function setTool(tl){ S.tool = tl; document.querySelectorAll("[data-tool]").forEach(b => b.classList.toggle("on", b.dataset.tool===tl)); $("stageWrap").classList.toggle("view", tl==="view"); }
 function toggle(btn, key, after){ S[key] = !S[key]; $(btn).classList.toggle("on", S[key]); if (after) after(); draw(); }
@@ -544,7 +562,7 @@ window.addEventListener("keydown", e => {
   const k = e.key;
   if ((e.ctrlKey || e.metaKey) && (k === "z" || k === "Z")){ e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && (k === "y" || k === "Y")){ e.preventDefault(); redo(); return; }
-  if (k === " "){ e.preventDefault(); play(); }
+  if (k === " "){ e.preventDefault(); if (!e.repeat){ spaceHeld = true; spaceUsed = false; $("stageWrap").classList.add("space"); } }
   else if (k === "ArrowLeft"){ stop(); step(-1); } else if (k === "ArrowRight"){ stop(); step(1); }
   else if (k === "Home"){ S.cur = 0; draw(); } else if (k === "End"){ S.cur = S.info.frames-1; draw(); }
   else if (k === "v" || k === "V") setTool("view"); else if (k === "b" || k === "B") setTool("brush");
@@ -556,6 +574,14 @@ window.addEventListener("keydown", e => {
   else if (k === "n" || k === "N") saveNote(); else if (k === "Escape") clearDraft();
   else if (/^[1-9]$/.test(k)) setZoom(+k * (S.info && S.info.height < 64 ? 2 : 1));
 });
+
+// Space: a tap plays / pauses; held, the mouse drags the view
+window.addEventListener("keyup", e => {
+  if (e.key !== " " || !spaceHeld) return;
+  spaceHeld = false; $("stageWrap").classList.remove("space");
+  if (!spaceUsed && !["INPUT","TEXTAREA","SELECT"].includes(document.activeElement.tagName)) play();
+});
+window.addEventListener("blur", () => { spaceHeld = false; $("stageWrap").classList.remove("space"); });
 
 // ------------------------------------------------------------------ live events
 function connect(){

@@ -146,7 +146,8 @@ same renderer as the tools, so it shows exactly what gets exported.
 
 - Plays frames at their real durations, by tag (forward, reverse, ping-pong), at 0.25x to 2x.
 - Onion skin (previous red, next blue), pixel grid, checker / green / dark / light backgrounds,
-  integer zoom (Ctrl+wheel).
+  integer zoom with the wheel (anchored on the cursor), drag the view holding Space, with the
+  middle button or the Move tool.
 - Compare two frames side by side, as a difference (changed pixels in magenta) or blinking.
 - Versions: every save is kept (last 30 per file in memory); pick an older one and see what a
   fix changed against the current file.
@@ -160,7 +161,7 @@ same renderer as the tools, so it shows exactly what gets exported.
 - Updates live (server-sent events) when a tool edits a file or it is saved in Aseprite; each
   version of a sprite renders once, as one strip the page slices.
 
-Keys: V move, B brush, R box, E eraser, Space play, arrows step, S select frame, O onion,
+Keys: V move, B brush, R box, E eraser, Space play (hold it to drag the view), wheel zoom, arrows step, S select frame, O onion,
 G grid, X glitches, M notes, D compare, 1-9 zoom, N save note, Esc clear, Ctrl+Z undo and
 Ctrl+Y / Ctrl+Shift+Z redo (strokes, boxes, erasing, frame selection, clearing).
 
