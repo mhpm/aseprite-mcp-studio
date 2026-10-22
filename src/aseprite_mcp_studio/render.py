@@ -61,13 +61,15 @@ def composite_onto(dst: np.ndarray, src: np.ndarray, opacity: float = 1.0, mode:
     dst[..., 3:4] = oa
 
 
-def _render_layers(spr: Sprite, frame: int, parent: Layer | None, layers_filter) -> np.ndarray:
+def _render_layers(
+    spr: Sprite, frame: int, parent: Layer | None, layers_filter, include_hidden: bool = False
+) -> np.ndarray:
     acc = np.zeros((spr.height, spr.width, 4), float)
     for la in spr.children(parent):
-        if not la.visible or (layers_filter and not layers_filter(la)):
+        if (not la.visible and not include_hidden) or (layers_filter and not layers_filter(la)):
             continue
         if la.kind == "group":
-            sub = _render_layers(spr, frame, la, layers_filter)
+            sub = _render_layers(spr, frame, la, layers_filter, include_hidden)
             composite_onto(acc, to_uint8(sub), la.opacity / 255, la.blend)
             continue
         c = la.cels.get(frame)
@@ -100,8 +102,10 @@ def render_frame(
     layers: list[str] | None = None,
     exclude: list[str] | None = None,
     include_reference: bool = False,
+    include_hidden: bool = False,
 ) -> np.ndarray:
-    """Flattened RGBA (uint8) of one 0-based frame."""
+    """Flattened RGBA (uint8) of one 0-based frame. include_hidden also draws hidden layers
+    (for reading a layer that was hidden on purpose, such as a rig's source)."""
     want = {spr.layer(n).path for n in layers} if layers else None
     skip = {spr.layer(n).path for n in exclude} if exclude else set()
 
@@ -114,7 +118,7 @@ def render_frame(
             return True
         return la.path in want or any(la.path.startswith(w + "/") for w in want)
 
-    return to_uint8(_render_layers(spr, frame, None, filt))
+    return to_uint8(_render_layers(spr, frame, None, filt, include_hidden))
 
 
 def upscale(img: np.ndarray, s: int) -> np.ndarray:

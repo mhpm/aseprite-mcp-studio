@@ -294,9 +294,29 @@ def test_rig_idle_preset_keeps_identity(tmp_path):
     assert all(fr["palette_conformance"] == 1.0 for fr in ident["frames"])
     anim = server.check_animation(f, kind="loop", layer="idle")
     assert anim["ok"], anim
+    # the source is now hidden; animating it again must still read it
+    _, spr = server.store.load(f)
+    assert not spr.layer("master").visible
+    res2, _ = server.animate_rig(f, rig, out_layer="idle", preset="idle", source_layer="master")
+    assert res2["frames"] == [1, 2, 3, 4]
+    info2, _img = server.rig_preview(f, rig, layer="master")
+    assert info2["parts"]["head"]["pixels"] == info["parts"]["head"]["pixels"]
 
 
-def test_damage_number_rises_and_fades(tmp_path):
+def test_direct_buffer_ops_report_pixels_written(tmp_path):
+    f = str(tmp_path / "w.aseprite")
+    server.sprite_new(f, 10, 10, frames=3)
+    server.apply(f, [{"op": "rect", "x": 2, "y": 2, "w": 4, "h": 4, "color": "red", "fill": True, "frames": "all"}])
+    r = server.apply(
+        f,
+        [
+            {"op": "clear", "frames": [1], "region": [0, 0, 4, 10]},  # covers 2 of the 4 columns
+            {"op": "erase", "x": 0, "y": 0, "w": 3, "h": 10, "frames": [2]},
+            {"op": "flash", "color": "#ffffff", "frames": [3]},
+            {"op": "flash", "color": "#ffffff", "frames": [3]},  # already white: nothing changes
+        ],
+    )
+    assert [x["pixels_written"] for x in r["results"]] == [8, 4, 16, 0]
     f = str(tmp_path / "d.aseprite")
     server.sprite_new(f, 40, 30, frames=6)
     r = server.apply(f, [{"op": "damage_number", "text": "-12", "x": 20, "y": 25, "frames": "1-6", "rise": 10}])

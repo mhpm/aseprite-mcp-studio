@@ -446,7 +446,8 @@ _PART_COLORS = [
 
 
 def _rig_source(spr, layer, frame):
-    return render.render_frame(spr, spr.check_frame(frame), [layer] if layer else None)
+    # a named source layer is read even when hidden: animate_rig hides it after the first run
+    return render.render_frame(spr, spr.check_frame(frame), [layer] if layer else None, include_hidden=bool(layer))
 
 
 @tool

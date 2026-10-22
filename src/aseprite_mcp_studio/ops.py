@@ -364,9 +364,16 @@ def clear(spr, ctx, layer=None, frame=None, frames=None, region=None):
     x, y, w, h = region
 
     def paint(s: Surface, f: int):
-        s.view(x, y, w, h)[...] = 0
+        _wipe(s, x, y, w, h)
 
     return _draw(spr, layer, fs, False, paint)
+
+
+def _wipe(s: Surface, x: int, y: int, w: int, h: int) -> None:
+    """Make a rectangle transparent, counting the pixels that were there."""
+    v = s.view(x, y, w, h)
+    s.written += int((v[..., 3] > 0).sum())
+    v[...] = 0
 
 
 @op("layer, source (frame), frames")
@@ -630,7 +637,7 @@ def stamp(
 @op("x, y, w, h, layer?, frames?")
 def erase(spr, ctx, x: int, y: int, w: int, h: int, layer=None, frame=None, frames=None):
     def paint(s: Surface, f: int):
-        s.view(x, y, w, h)[...] = 0
+        _wipe(s, x, y, w, h)
 
     return _draw(spr, layer, frames_of(spr, frame, frames), False, paint)
 
@@ -678,7 +685,9 @@ def flash(spr, ctx, color: str = "#ffffff", amount: float = 1.0, layer=None, fra
     def paint(s: Surface, f: int):
         on = s.buf[..., 3] > 0
         rgb = s.buf[..., :3].astype(float)
-        s.buf[..., :3] = np.where(on[..., None], np.round(rgb + (c - rgb) * amount), rgb).astype(np.uint8)
+        new = np.where(on[..., None], np.round(rgb + (c - rgb) * amount), rgb).astype(np.uint8)
+        s.written += int((new != s.buf[..., :3]).any(-1).sum())
+        s.buf[..., :3] = new
 
     return _draw(spr, layer, frames_of(spr, frame, frames), False, paint)
 
